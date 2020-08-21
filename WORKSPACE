@@ -128,14 +128,13 @@ http_archive(
     sha256 = protobuf_version_sha256,
 )
 
-
-git_repository(
-    name = "graknlabs_bazel_distribution",
-    remote = "https://github.com/andrefmrocha/bazel-distribution",
-    commit = "d4a429f649c61085d7197da3a268c39d42b5a562",
-)
-
 local_repository(
     name = "sample_repo",
     path = "sample-repo"
+)
+
+git_repository(
+    name = "pomgen",
+    remote = "https://github.com/salesforce/pomgen.git",
+    commit = "ba350ef7730e9acdca3795e1035fbacabc9b6940"
 )

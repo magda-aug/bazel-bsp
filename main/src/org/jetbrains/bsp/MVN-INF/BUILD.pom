@@ -1,0 +1,10 @@
+maven_artifact(
+    group_id = "org.jetbrains.bsp",
+    artifact_id = "bazel-bsp",
+    version = "0.1.0-SNAPSHOT",
+    pom_generation_mode = "dynamic",
+)
+
+maven_artifact_update(
+    version_increment_strategy = "minor",
+)
