@@ -23,6 +23,7 @@ import ch.epfl.scala.bsp4j.JavaBuildServer;
 import ch.epfl.scala.bsp4j.JavacOptionsParams;
 import ch.epfl.scala.bsp4j.JavacOptionsResult;
 import ch.epfl.scala.bsp4j.JvmBuildTarget;
+import ch.epfl.scala.bsp4j.PublishDiagnosticsParams;
 import ch.epfl.scala.bsp4j.ResourcesItem;
 import ch.epfl.scala.bsp4j.ResourcesParams;
 import ch.epfl.scala.bsp4j.ResourcesResult;
@@ -54,6 +55,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -84,12 +86,14 @@ import org.jetbrains.bsp.bazel.server.resolvers.BazelDataResolver;
 import org.jetbrains.bsp.bazel.server.resolvers.BazelRunner;
 import org.jetbrains.bsp.bazel.server.resolvers.QueryResolver;
 import org.jetbrains.bsp.bazel.server.resolvers.TargetsResolver;
-import org.jetbrains.bsp.bazel.server.utils.ParsingUtils;
 
 public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildServer {
 
   public static final ImmutableSet<String> KNOWN_SOURCE_ROOTS =
       ImmutableSet.of("java", "scala", "kotlin", "javatests", "src", "test", "main", "testsrc");
+  protected static final String SCALAC = "Scalac";
+  protected static final String KOTLINC = "KotlinCompile";
+  protected static final String JAVAC = "Javac";
 
   private final List<String> FILE_EXTENSIONS =
       ImmutableList.of(
@@ -126,9 +130,11 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
     this.bazelData = bazelDataResolver.resolveBazelData();
 
     this.scalaBspServer =
-        new ScalaBspServer(targetsResolver, actionGraphResolver, getBazelData().getExecRoot());
+        new ScalaBspServer(
+            targetsResolver, actionGraphResolver, SCALAC, JAVAC, getBazelData().getExecRoot());
     this.javaBspServer =
-        new JavaBspServer(targetsResolver, actionGraphResolver, getBazelData().getExecRoot());
+        new JavaBspServer(
+            targetsResolver, actionGraphResolver, JAVAC, KOTLINC, getBazelData().getExecRoot());
   }
 
   @Override
@@ -221,13 +227,12 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
 
     for (SourceItem source : sources) {
       if (source.getUri().endsWith(".scala")) {
-        extensions.add(Constants.SCALA);
+        extensions.add("scala");
       } else if (source.getUri().endsWith(".java")) {
-        extensions.add(Constants.JAVA);
+        extensions.add("java");
       } else if (source.getUri().endsWith(".kt")) {
-        extensions.add(Constants.KOTLIN);
-        extensions.add(
-            Constants.JAVA); // TODO(andrefmrocha): Remove this when kotlin is natively supported
+        extensions.add("kotlin");
+        extensions.add("java"); // TODO(andrefmrocha): Remove this when kotlin is natively supported
       }
     }
 
@@ -243,7 +248,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
     target.setBaseDirectory(
         Uri.packageDirFromLabel(label.getUri(), getBazelData().getWorkspaceRoot()).toString());
     target.setDisplayName(label.getUri());
-    if (extensions.contains(Constants.SCALA)) {
+    if (extensions.contains("scala")) {
       getScalaBuildTarget()
           .ifPresent(
               (buildTarget) -> {
@@ -251,7 +256,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
                 target.setTags(Lists.newArrayList(getRuleType(rule)));
                 target.setData(buildTarget);
               });
-    } else if (extensions.contains(Constants.JAVA) || extensions.contains(Constants.KOTLIN)) {
+    } else if (extensions.contains("java") || extensions.contains("kotlin")) {
       target.setDataKind(BuildTargetDataKind.JVM);
       target.setTags(Lists.newArrayList(getRuleType(rule)));
       target.setData(getJVMBuildTarget());
@@ -288,7 +293,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
               "--aspects=@//.bazelbsp:aspects.bzl%scala_compiler_classpath_aspect",
               "--output_groups=scala_compiler_classpath_files"));
       List<String> classpath =
-          bepServer.getCompilerClasspath().stream().map(Uri::toString).collect(Collectors.toList());
+          bepServer.fetchScalacClasspath().stream().map(Uri::toString).collect(Collectors.toList());
       List<String> scalaVersions =
           classpath.stream()
               .filter(uri -> uri.contains("scala-library"))
@@ -479,11 +484,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
     // logging
     List<String> lines =
         bazelRunner
-            .runBazelCommand(
-                Constants.BAZEL_BUILD_COMMAND,
-                "--aspects",
-                "@//.bazelbsp:aspects.bzl%print_aspect",
-                target)
+            .runBazelCommand("build", "--aspects", "@//.bazelbsp:aspects.bzl%print_aspect", target)
             .getStderr();
     return lines.stream()
         .map(line -> Splitter.on(" ").splitToList(line))
@@ -493,7 +494,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
                     && parts.get(0).equals("DEBUG:")
                     && parts.get(1).contains(".bazelbsp/aspects.bzl")
                     && parts.get(2).endsWith(".jar"))
-        .map(parts -> Constants.EXEC_ROOT_PREFIX + parts.get(2))
+        .map(parts -> "exec-root://" + parts.get(2))
         .collect(Collectors.toList());
   }
 
@@ -582,7 +583,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
 
   private Either<ResponseError, CompileResult> buildTargetsWithBep(
       List<BuildTargetIdentifier> targets, List<String> extraFlags) {
-    List<String> args = Lists.newArrayList(Constants.BAZEL_BUILD_COMMAND);
+    List<String> args = Lists.newArrayList("build");
     args.addAll(targets.stream().map(BuildTargetIdentifier::getUri).collect(Collectors.toList()));
     args.addAll(extraFlags);
     int exitCode = -1;
@@ -601,7 +602,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
 
     for (Build.Target target : queryResult.getTargetList()) {
       target.getRule().getRuleOutputList().stream()
-          .filter(output -> output.contains(Constants.DIAGNOSTICS))
+          .filter(output -> output.contains("diagnostics"))
           .forEach(
               output ->
                   diagnosticsProtosLocations.put(
@@ -623,12 +624,17 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
     for (Map.Entry<String, String> diagnostics : diagnosticsProtosLocations.entrySet()) {
       String target = diagnostics.getKey();
       String diagnosticsPath = diagnostics.getValue();
-      BuildTargetIdentifier targetIdentifier = new BuildTargetIdentifier(target);
-      bepServer.emitDiagnostics(
-          bepServer.collectDiagnostics(targetIdentifier, diagnosticsPath), targetIdentifier);
+      Map<Uri, List<PublishDiagnosticsParams>> filesToDiagnostics = new HashMap<>();
+      try {
+        BuildTargetIdentifier targetIdentifier = new BuildTargetIdentifier(target);
+        bepServer.getDiagnostics(filesToDiagnostics, targetIdentifier, diagnosticsPath);
+        bepServer.emitDiagnostics(filesToDiagnostics, targetIdentifier);
+      } catch (IOException e) {
+        System.err.println("Failed to get diagnostics for " + target);
+      }
     }
 
-    return Either.forRight(new CompileResult(ParsingUtils.parseExitCode(exitCode)));
+    return Either.forRight(new CompileResult(BepServer.convertExitCode(exitCode)));
   }
 
   private String convertOutputToPath(String output, String prefix) {
@@ -660,12 +666,12 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
           ProcessResults processResults =
               bazelRunner.runBazelCommand(
                   Lists.asList(
-                      Constants.BAZEL_TEST_COMMAND,
+                      "test",
                       "(" + testTargets + ")",
                       testParams.getArguments().toArray(new String[0])));
 
           return Either.forRight(
-              new TestResult(ParsingUtils.parseExitCode(processResults.getExitCode())));
+              new TestResult(BepServer.convertExitCode(processResults.getExitCode())));
         });
   }
 
@@ -687,12 +693,12 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
           ProcessResults processResults =
               bazelRunner.runBazelCommand(
                   Lists.asList(
-                      Constants.BAZEL_RUN_COMMAND,
+                      "run",
                       runParams.getTarget().getUri(),
                       runParams.getArguments().toArray(new String[0])));
 
           return Either.forRight(
-              new RunResult(ParsingUtils.parseExitCode(processResults.getExitCode())));
+              new RunResult(BepServer.convertExitCode(processResults.getExitCode())));
         });
   }
 
@@ -705,10 +711,7 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
           try {
             result =
                 new CleanCacheResult(
-                    String.join(
-                        "\n",
-                        bazelRunner.runBazelCommand(Constants.BAZEL_CLEAN_COMMAND).getStdout()),
-                    true);
+                    String.join("\n", bazelRunner.runBazelCommand("clean").getStdout()), true);
           } catch (RuntimeException e) {
             // TODO does it make sense to return a successful response here?
             // If we caught an exception here, there was an internal server error...
@@ -814,8 +817,8 @@ public class BazelBspServer implements BuildServer, ScalaBuildServer, JavaBuildS
                     : CompletableFuture.completedFuture(either.getRight()));
   }
 
-  public Collection<SourceItem> getCachedBuildTargetSources(BuildTargetIdentifier target) {
-    return targetsToSources.getOrDefault(target, ImmutableList.of());
+  public Iterable<SourceItem> getCachedBuildTargetSources(BuildTargetIdentifier target) {
+    return targetsToSources.getOrDefault(target, new ArrayList<>());
   }
 
   public void setBesBackendPort(int port) {
